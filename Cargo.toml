@@ -1,0 +1,35 @@
+[package]
+name = "libpam-okta"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "PAM Module for Okta"
+readme = "README.md"
+homepage = "https://github.com/hurricanelabs/libpam-okta"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+pamsm = { version = "0.5.0", features = ["libpam"] }
+serde = { version = "1.0.130", features = ["derive"] }
+serde_json = "1.0.71"
+ureq = { version = "2.3.1", features = ["json"] }
+
+[lib]
+name = "pam_okta"
+crate-type = ["cdylib"]
+
+[package.metadata.deb]
+maintainer = "Steve McMaster <mcmaster@hurricanelabs.com>"
+copyright = "2021, Hurricane Labs <mcmaster@hurricanelabs.com>"
+extended-description = """\
+This package contains the PAM module, which performs multi-factor \
+authentication via Okta. It supports several factor types, as well as \
+device authorization OAuth."""
+depends = "$auto"
+section = "admin"
+priority = "optional"
+assets = [
+    ["target/release/libpam_okta.so", "lib/x86_64-linux-gnu/security/pam_okta.so", "644"],
+    ["README.md", "usr/share/doc/libpam-okta/README", "644"],
+]
