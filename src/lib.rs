@@ -65,6 +65,8 @@ fn verify_second_factor(pamh: &Pam, factor: &serde_json::Value, state_token: &st
 
     let now = Instant::now();
 
+    let mut displayed_challenge_answer = false;
+
     while now.elapsed().as_millis() <= 30000 {
         let resp_json: serde_json::Value = match ureq::post(&factor_verify_url)
             .set("accept", "application/json")
@@ -73,7 +75,7 @@ fn verify_second_factor(pamh: &Pam, factor: &serde_json::Value, state_token: &st
                     Ok(result) => result,
                     Err(_) => return None
                 },
-                Err(_) => return Some(false)
+                Err(_) => return None
             };
 
         let status = resp_json["status"].as_str().unwrap_or("");
@@ -82,57 +84,66 @@ fn verify_second_factor(pamh: &Pam, factor: &serde_json::Value, state_token: &st
         if status == "SUCCESS" {
             return Some(true);
         } else if factor_result == "CHALLENGE" {
-            match (factor_type, factor_provider) {
-                // ("push", "OKTA") => {},
-                ("token:software:totp", "OKTA") | ("token:software:totp", "GOOGLE") => {
-                    let prompt = format!("{} 6-digit PIN: ", factor_provider);
+            let prompt: String;
 
-                    match pamh.conv(Some(prompt.as_str()), PamMsgStyle::PROMPT_ECHO_OFF) {
-                        Ok(Some(code)) => {
-                            let pass_code = code.to_str().unwrap_or("");
-                            if pass_code.is_empty() {
-                                return None
-                            }
-                            factor_data.insert("passCode", pass_code);
-                        },
-                        Ok(_) | Err(_) => return None,
-                    }
+            match (factor_type, factor_provider) {
+                ("token:software:totp", "OKTA") | ("token:software:totp", "GOOGLE") => {
+                    prompt = format!("{} 6-digit PIN: ", factor_provider);
                 },
-                // ("token:software:totp", "GOOGLE") => {},
                 ("token:hardware", "YUBICO") => {
-                    match pamh.conv(Some("Please press your Yubikey."), PamMsgStyle::PROMPT_ECHO_OFF) {
-                        Ok(Some(code)) => {
-                            let pass_code = code.to_str().unwrap_or("");
-                            if pass_code.is_empty() {
-                                return None
-                            }
-                            factor_data.insert("passCode", pass_code);
-                        },
-                        Ok(_) | Err(_) => return None,
-                    }
+                    prompt = String::from("Please press your Yubikey.");
                 },
                 ("call", "OKTA") | ("sms", "OKTA") => {
-                    let prompt = format!("Verification code received via {}: ", factor_type);
-
-                    match pamh.conv(Some(prompt.as_str()), PamMsgStyle::PROMPT_ECHO_OFF) {
-                        Ok(Some(code)) => {
-                            let pass_code = code.to_str().unwrap_or("");
-                            if pass_code.is_empty() {
-                                return None
-                            }
-                            factor_data.insert("passCode", pass_code);
-                        },
-                        Ok(_) | Err(_) => return None,
-                    }
+                    prompt = format!("Verification code received via {}: ", factor_type);
                 },
                 (_, _) => {
                     println!("Received unexpected CHALLENGE result");
                     return None;
                 }
+            };
+
+            match pamh.conv(Some(prompt.as_str()), PamMsgStyle::PROMPT_ECHO_OFF) {
+                Ok(Some(code)) => {
+                    let pass_code = code.to_str().unwrap_or("");
+                    if pass_code.is_empty() {
+                        return None
+                    }
+                    factor_data.insert("passCode", pass_code);
+                },
+                Ok(_) => return None,
+                Err(PamError::CONV_ERR) => return Some(false),
+                Err(_) => return None,
             }
+        } else if factor_result == "REJECTED" {
+            // User rejected the push notification
+            return None;
         } else if factor_result != "WAITING" {
             println!("Received unexpected factorResult {}", factor_result);
             return None;
+        }
+
+        match resp_json["_embedded"]["factors"]["_embedded"]["challenge"]["correctAnswer"].as_str() {
+            Some(correct_answer) => {
+                /*
+                Note: If Okta detects an unusual sign-in attempt, the end user will receive a 3-number verification
+                challenge and the correct answer of the challenge will be provided in the polling response. This is
+                similar to the standard waiting response but with the addition of a correctAnswer property in the
+                challenge object. The correctAnswer property will only be included in the response if the end user is
+                on the 3-number verification challenge view in the Okta Verify mobile app. Look at
+                [Sign in to your org with Okta Verify] for more details about this challenge flow.
+
+                [Sign in to your org with Okta Verify]: https://help.okta.com/okta_help.htm?id=csh-ov-signin
+                */
+                if !displayed_challenge_answer {
+                    let prompt = format!("On your device, the correct answer is {}.", correct_answer);
+                    match pamh.conv(Some(prompt.as_str()), PamMsgStyle::TEXT_INFO) {
+                        Ok(_) => {},
+                        Err(_) => return None,
+                    };
+                    displayed_challenge_answer = true;
+                }
+            },
+            None => {},
         }
 
         sleep(Duration::from_secs(1));
@@ -141,7 +152,38 @@ fn verify_second_factor(pamh: &Pam, factor: &serde_json::Value, state_token: &st
     None
 }
 
-fn verify_device_grant(okta_tenant: &str,
+fn get_oauth2_userinfo(okta_tenant: &str, auth_header: &str) -> Option<String> {
+    let userinfo_url = format!("https://{}/oauth2/v1/userinfo", okta_tenant);
+
+    println!("{}", userinfo_url);
+    println!("{}", auth_header);
+
+    let resp_json: serde_json::Value = match ureq::get(userinfo_url.as_str())
+        .set("authorization", &auth_header)
+        .call() {
+            Ok(response) => match response.into_json() {
+                Ok(result) => result,
+                Err(_) => return None
+            },
+            Err(_) => return None,
+        };
+
+    println!(
+        "Logged in as {} ({})",
+        resp_json["name"].as_str().unwrap_or("unknown"),
+        resp_json["preferred_username"].as_str().unwrap_or("unknown"),
+    );
+
+    let logged_in_user = match resp_json["preferred_username"].as_str() {
+        Some(val) => String::from(val),
+        None => return None
+    };
+
+    Some(logged_in_user)
+}
+
+fn verify_device_grant(pamh: &Pam,
+                       okta_tenant: &str,
                        okta_client_id: &str) -> Option<String> {
 
     let now = Instant::now();
@@ -191,14 +233,18 @@ fn verify_device_grant(okta_tenant: &str,
         None => 5
     };
 
-    println!("Open {} in your browser and continue authentication there", verify_url);
+    // println!("Open {} in your browser and continue authentication there", verify_url);
+    let prompt = format!("Open {} in your browser and continue authentication there", verify_url);
+    match pamh.conv(Some(prompt.as_str()), PamMsgStyle::TEXT_INFO) {
+        Ok(_) => {},
+        Err(_) => return None,
+    };
 
     let mut access_token = String::from("");
 
     let token_url = format!("https://{}/oauth2/v1/token", okta_tenant);
 
     while now.elapsed().as_secs() < expires_in {
-
         let resp_json: serde_json::Value = match ureq::post(token_url.as_str())
             .set("accept", "application/json")
             .send_form(&[
@@ -255,39 +301,19 @@ fn verify_device_grant(okta_tenant: &str,
     }
 
     let auth_header = format!("Bearer {}", access_token);
-    let userinfo_url = format!("https://{}/oauth2/v1/userinfo", okta_tenant);
 
-    let resp_json: serde_json::Value = match ureq::get(userinfo_url.as_str())
-        .set("authorization", &auth_header)
-        .call() {
-            Ok(response) => match response.into_json() {
-                Ok(result) => result,
-                Err(_) => return None
-            },
-            Err(_) => return None,
-        };
-
-    // println!(
-    //     "Logged in as {} ({})",
-    //     resp_json["name"].as_str().unwrap_or("unknown"),
-    //     resp_json["preferred_username"].as_str().unwrap_or("unknown"),
-    // );
-
-    let logged_in_user = match resp_json["preferred_username"].as_str() {
-        Some(val) => String::from(val),
-        None => return None
-    };
-
-    Some(logged_in_user)
+    get_oauth2_userinfo(okta_tenant, &auth_header)
 }
 
 impl PamServiceModule for PamOkta {
     fn authenticate(pamh: Pam, _: PamFlags, args: Vec<String>) -> PamError {
         // Parse args
-        let mut okta_tenant = String::from("");
         let mut okta_client_id = String::from("");
+        let mut okta_tenant = String::from("");
+        let mut username = String::from("");
         let mut username_suffix = String::from("");
         let mut check_username_prefix = false;
+        let mut nullok = false;
 
         for arg in args {
             // println!("Got arg: {}", arg);
@@ -310,6 +336,7 @@ impl PamServiceModule for PamOkta {
                         },
                         "client_id" => okta_client_id.push_str(argvalue),
                         "username_suffix" => username_suffix.push_str(argvalue),
+                        "force_username" => username.push_str(argvalue),
                         _ => {},
                     }
                 },
@@ -320,6 +347,9 @@ impl PamServiceModule for PamOkta {
                     match argname.as_str() {
                         "check_username_prefix" => {
                             check_username_prefix = true;
+                        },
+                        "nullok" => {
+                            nullok = true;
                         },
                         _ => {},
                     }
@@ -337,12 +367,15 @@ impl PamServiceModule for PamOkta {
             okta_tenant.push_str(".okta.com");
         }
 
-        // Determine username
-        let username = match pamh.get_user(Some("Username: ")) {
-            Ok(Some(user)) => user.to_str().unwrap_or(""),
-            Ok(None) => return PamError::USER_UNKNOWN,
-            Err(e) => return e,
+        // Determine username, if config doesn't force a username
+        if username.is_empty() {
+            match pamh.get_user(Some("Username: ")) {
+                Ok(Some(user)) => username.push_str(user.to_str().unwrap_or("")),
+                Ok(None) => return PamError::USER_UNKNOWN,
+                Err(e) => return e,
+            };
         };
+        let username = username.as_str();
         // Get password
         let password = match pamh.get_authtok(Some("Password: ")) {
             Ok(Some(pass)) => pass.to_str().unwrap_or(""),
@@ -350,10 +383,12 @@ impl PamServiceModule for PamOkta {
             Err(e) => return e,
         };
 
+        let password = String::from(password);
+
         let okta_tenant = okta_tenant.as_str();
         let okta_client_id = okta_client_id.as_str();
 
-        if password == "" && !okta_client_id.is_empty() {
+        if !okta_client_id.is_empty() && password.is_empty() {
             let mut valid_usernames: Vec<&str> = vec!(username);
             let mut username_with_suffix = String::from("");
 
@@ -362,7 +397,7 @@ impl PamServiceModule for PamOkta {
                 valid_usernames.push(username_with_suffix.as_str());
             }
 
-            match verify_device_grant(okta_tenant, okta_client_id) {
+            match verify_device_grant(&pamh, okta_tenant, okta_client_id) {
                 Some(logged_in_user) => {
                     let mut logged_in_user_forms: Vec<&str> = vec!(&logged_in_user);
 
@@ -389,72 +424,75 @@ impl PamServiceModule for PamOkta {
                 },
                 None => return PamError::AUTHINFO_UNAVAIL,
             }
-        } else {
-            let password = String::from(password);
-            let authtok = password.clone();
+        } else if password.is_empty() && !nullok {
+            return PamError::AUTH_ERR;
+        }
 
-            match CString::new(authtok) {
-                Ok(val) => {
-                    let _ = pamh.set_authtok(&val);
-                },
-                Err(_) => {},
-            };
-            let resp_json: serde_json::Value = match verify_first_factor(okta_tenant, username, password.as_str()) {
-                Ok(response) => match response.into_json() {
-                    Ok(result) => result,
-                    Err(_) => {
-                        // println!("First factor success, but failed to decode response");
-                        return PamError::AUTHINFO_UNAVAIL;
-                    }
-                },
-                Err(ureq::Error::Status(_code, _response)) => {
-                    // println!("{}: {}", code, response.into_string().unwrap_or(String::from("")));
-                    return PamError::AUTHINFO_UNAVAIL;
-                },
+        // Set authtok for other modules
+        let authtok = password.clone();
+
+        match CString::new(authtok) {
+            Ok(val) => {
+                let _ = pamh.set_authtok(&val);
+            },
+            Err(_) => {},
+        };
+
+        let resp_json: serde_json::Value = match verify_first_factor(okta_tenant, username, &password) {
+            Ok(response) => match response.into_json() {
+                Ok(result) => result,
                 Err(_) => {
-                    // println!("First factor failed");
+                    // println!("First factor success, but failed to decode response");
                     return PamError::AUTHINFO_UNAVAIL;
                 }
-            };
-
-            let resp_status = match resp_json["status"].as_str() {
-                Some(val) => val,
-                None => {
-                    // println!("Malformed response, missing 'status'");
-                    return PamError::AUTHINFO_UNAVAIL;
-                }
-            };
-
-            if resp_status == "SUCCESS" {
-                return PamError::SUCCESS;
-            } else if resp_status != "MFA_REQUIRED" {
-                // println!("Got unexpected status {}", resp_status);
-                return PamError::AUTH_ERR
+            },
+            Err(ureq::Error::Status(_code, _response)) => {
+                // println!("{}: {}", code, response.into_string().unwrap_or(String::from("")));
+                return PamError::AUTHINFO_UNAVAIL;
+            },
+            Err(_) => {
+                // println!("First factor failed");
+                return PamError::AUTHINFO_UNAVAIL;
             }
+        };
 
-            // Verify second factor
-            let factors = match resp_json["_embedded"]["factors"].as_array() {
-                Some(arr) => arr,
-                None => {
-                    // println!("Could not decode factors in response");
-                    return PamError::AUTHINFO_UNAVAIL;
-                },
-            };
+        let resp_status = match resp_json["status"].as_str() {
+            Some(val) => val,
+            None => {
+                // println!("Malformed response, missing 'status'");
+                return PamError::AUTHINFO_UNAVAIL;
+            }
+        };
 
-            let state_token: &str = match resp_json["stateToken"].as_str() {
-                Some(val) => val,
-                None => {
-                    // println!("Could not decode stateToken in response");
-                    return PamError::AUTHINFO_UNAVAIL;
-                },
-            };
+        if resp_status == "SUCCESS" {
+            return PamError::SUCCESS;
+        } else if resp_status != "MFA_REQUIRED" {
+            // println!("Got unexpected status {}", resp_status);
+            return PamError::AUTH_ERR
+        }
 
-            for factor in factors {
-                match verify_second_factor(&pamh, factor, state_token) {
-                    Some(true) => return PamError::SUCCESS,
-                    Some(false) => return PamError::AUTH_ERR,
-                    None => {}
-                }
+        // Verify second factor
+        let factors = match resp_json["_embedded"]["factors"].as_array() {
+            Some(arr) => arr,
+            None => {
+                // println!("Could not decode factors in response");
+                return PamError::AUTHINFO_UNAVAIL;
+            },
+        };
+
+        let state_token: &str = match resp_json["stateToken"].as_str() {
+            Some(val) => val,
+            None => {
+                // println!("Could not decode stateToken in response");
+                return PamError::AUTHINFO_UNAVAIL;
+            },
+        };
+
+        for factor in factors {
+            match verify_second_factor(&pamh, factor, state_token) {
+                Some(true) => return PamError::SUCCESS,
+                Some(false) => return PamError::AUTH_ERR,
+                None => {}
             }
         }
 

@@ -10,6 +10,8 @@ homepage = "https://github.com/hurricanelabs/libpam-okta"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+# ctrlc = "3.2.1"
+libc = "0.2.107"
 pamsm = { version = "0.5.0", features = ["libpam"] }
 serde = { version = "1.0.130", features = ["derive"] }
 serde_json = "1.0.71"
