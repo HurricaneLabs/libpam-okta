@@ -54,6 +54,7 @@ fn verify_second_factor(pamh: &Pam, factor: &serde_json::Value, state_token: &st
     let factor_verify_url: &str = factor["_links"]["verify"]["href"].as_str().unwrap_or("");
 
     if !SUPPORTED_FACTORS.contains(&(factor_type, factor_provider)) {
+        // println!("Found unsupported {} factor provided by {}", factor_type, factor_provider);
         return None;
     }
 
@@ -67,6 +68,21 @@ fn verify_second_factor(pamh: &Pam, factor: &serde_json::Value, state_token: &st
 
     let mut displayed_challenge_answer = false;
 
+    if (factor_type, factor_provider) == ("token:hardware", "YUBICO") {
+        match pamh.conv(Some("Please press your Yubikey."), PamMsgStyle::PROMPT_ECHO_OFF) {
+            Ok(Some(code)) => {
+                let pass_code = code.to_str().unwrap_or("");
+                if pass_code.is_empty() {
+                    return None
+                }
+                factor_data.insert("passCode", pass_code);
+            },
+            Ok(_) => return None,
+            Err(PamError::CONV_ERR) => return Some(false),
+            Err(_) => return None,
+        }
+    }
+
     while now.elapsed().as_millis() <= 30000 {
         let resp_json: serde_json::Value = match ureq::post(&factor_verify_url)
             .set("accept", "application/json")
@@ -75,7 +91,14 @@ fn verify_second_factor(pamh: &Pam, factor: &serde_json::Value, state_token: &st
                     Ok(result) => result,
                     Err(_) => return None
                 },
-                Err(_) => return None
+                Err(ureq::Error::Status(_code, _response)) => {
+                    // println!("{}: {}", code, response.into_string().unwrap_or(String::from("")));
+                    return None;
+                },
+                Err(_) => {
+                    // println!("Failed to obtain device code");
+                    return None;
+                }
             };
 
         let status = resp_json["status"].as_str().unwrap_or("");
@@ -90,14 +113,11 @@ fn verify_second_factor(pamh: &Pam, factor: &serde_json::Value, state_token: &st
                 ("token:software:totp", "OKTA") | ("token:software:totp", "GOOGLE") => {
                     prompt = format!("{} 6-digit PIN: ", factor_provider);
                 },
-                ("token:hardware", "YUBICO") => {
-                    prompt = String::from("Please press your Yubikey.");
-                },
                 ("call", "OKTA") | ("sms", "OKTA") => {
                     prompt = format!("Verification code received via {}: ", factor_type);
                 },
                 (_, _) => {
-                    println!("Received unexpected CHALLENGE result");
+                    // println!("Received unexpected CHALLENGE result");
                     return None;
                 }
             };
@@ -118,7 +138,7 @@ fn verify_second_factor(pamh: &Pam, factor: &serde_json::Value, state_token: &st
             // User rejected the push notification
             return None;
         } else if factor_result != "WAITING" {
-            println!("Received unexpected factorResult {}", factor_result);
+            // println!("Received unexpected factorResult {}", factor_result);
             return None;
         }
 
@@ -155,8 +175,8 @@ fn verify_second_factor(pamh: &Pam, factor: &serde_json::Value, state_token: &st
 fn get_oauth2_userinfo(okta_tenant: &str, auth_header: &str) -> Option<String> {
     let userinfo_url = format!("https://{}/oauth2/v1/userinfo", okta_tenant);
 
-    println!("{}", userinfo_url);
-    println!("{}", auth_header);
+    // println!("{}", userinfo_url);
+    // println!("{}", auth_header);
 
     let resp_json: serde_json::Value = match ureq::get(userinfo_url.as_str())
         .set("authorization", &auth_header)
@@ -168,11 +188,11 @@ fn get_oauth2_userinfo(okta_tenant: &str, auth_header: &str) -> Option<String> {
             Err(_) => return None,
         };
 
-    println!(
-        "Logged in as {} ({})",
-        resp_json["name"].as_str().unwrap_or("unknown"),
-        resp_json["preferred_username"].as_str().unwrap_or("unknown"),
-    );
+    // println!(
+    //     "Logged in as {} ({})",
+    //     resp_json["name"].as_str().unwrap_or("unknown"),
+    //     resp_json["preferred_username"].as_str().unwrap_or("unknown"),
+    // );
 
     let logged_in_user = match resp_json["preferred_username"].as_str() {
         Some(val) => String::from(val),
@@ -269,7 +289,7 @@ fn verify_device_grant(pamh: &Pam,
                             }
                         }
                     } else {
-                        println!("{}: {}", code, response.into_string().unwrap_or(String::from("")));
+                        // println!("{}: {}", code, response.into_string().unwrap_or(String::from("")));
                         return None;
                     }
                 },
