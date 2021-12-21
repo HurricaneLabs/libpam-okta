@@ -1,0 +1,23 @@
+Source: libpam-okta
+Priority: optional
+Section: admin
+Maintainer: Steve McMaster <mcmaster@hurricanelabs.com>
+Build-Depends: debhelper (>= 9),
+ cargo:native <!nocheck>,
+ rustc:native <!nocheck>,
+ libstd-rust-dev <!nocheck>,
+ libpam0g-dev
+Standards-Version: 3.9.8
+Homepage: https://github.com/hurricanelabs/libpam-okta
+Vcs-Git: git://github.com/hurricanelabs/libpam-okta.git
+Vcs-Browser: https://github.com/hurricanelabs/libpam-okta
+
+Package: libpam-okta
+Section: admin
+Priority: optional
+Architecture: any
+Multi-Arch: same
+Depends: libpam0g, ${shlibs:Depends}, ${misc:Depends}
+Description: PAM module to enable Okta support
+ This package includes libpam_okta, a PAM module that enables
+ multi-factor authentication using Okta.

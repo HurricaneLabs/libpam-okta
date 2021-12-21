@@ -1,3 +1,7 @@
-/target
+build
+target
 libpam-okta.tar.gz
 .DS_Store
+fixup.sh
+packpack
+.vscode

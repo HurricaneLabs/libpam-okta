@@ -1,14 +1,14 @@
 Name:		pam-okta
 Version:	0.1.0
-Release:	1
+Release:	1%{?dist}
 Summary:	PAM Module for Okta
 
 License:	BSD
 URL:		https://github.com/hurricanelabs/libpam-okta
-Source0:	libpam-okta.tar.gz
+Source0:	libpam-okta-%{version}.tar.gz
 
 BuildRequires: cargo
-BuildRequires:	pam-devel
+BuildRequires: pam-devel
 
 %description
 This package contains the PAM module, which performs multi-factor
@@ -19,12 +19,16 @@ device authorization OAuth.
 %autosetup -n libpam-okta
 
 %build
-cargo build --release
+make -j1
 
 %install
-mkdir -p $RPM_BUILD_ROOT/%{_libdir}/security
-cp target/release/libpam_okta.so $RPM_BUILD_ROOT/%{_libdir}/security/pam_okta.so
+LIBDIR=%{_libdir} DESTDIR=$RPM_BUILD_ROOT make install
 
 %files
 %doc README.md
 %{_libdir}/security/*
+%{_bindir}/okta-select-factor
+
+%changelog
+* Tue Dec 21 2021 Steve McMaster <mcmaster@hurricanelabs.com> 0.1.0-1
+- Initial release

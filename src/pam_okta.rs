@@ -16,7 +16,16 @@ use ureq;
 
 struct PamOkta;
 
-fn verify_first_factor(okta_tenant: &str, username: &str, password: &str) -> Result<ureq::Response, ureq::Error> {
+pub const SUPPORTED_FACTORS: [(&str, &str); 6] = [
+    ("push", "OKTA"),
+    ("token:software:totp", "OKTA"),
+    ("token:software:totp", "GOOGLE"),
+    ("token:hardware", "YUBICO"),
+    ("call", "OKTA"),
+    ("sms", "OKTA"),
+];
+
+pub fn verify_first_factor(okta_tenant: &str, username: &str, password: &str) -> Result<ureq::Response, ureq::Error> {
     let authn_url = format!("https://{}/api/v1/authn", okta_tenant);
 
     // println!("Authn URL: {}", authn_url);
@@ -38,16 +47,9 @@ fn verify_first_factor(okta_tenant: &str, username: &str, password: &str) -> Res
         }))
 }
 
-fn verify_second_factor(pamh: &Pam, factor: &serde_json::Value, state_token: &str) -> Option<bool> {
-    const SUPPORTED_FACTORS: [(&str, &str); 6] = [
-        ("push", "OKTA"),
-        ("token:software:totp", "OKTA"),
-        ("token:software:totp", "GOOGLE"),
-        ("token:hardware", "YUBICO"),
-        ("call", "OKTA"),
-        ("sms", "OKTA"),
-    ];
-
+pub fn verify_second_factor<F: Fn(&str, bool) -> Option<String>>(factor: &serde_json::Value,
+                                                                 state_token: &str,
+                                                                 prompt_func: F) -> Option<bool> {
     // let factor_id: &str = factor["id"].as_str().unwrap_or("");
     let factor_provider: &str = factor["provider"].as_str().unwrap_or("");
     let factor_type: &str = factor["factorType"].as_str().unwrap_or("");
@@ -60,16 +62,19 @@ fn verify_second_factor(pamh: &Pam, factor: &serde_json::Value, state_token: &st
 
     // println!("Trying {} factor provided by {}", factor_type, factor_provider);
 
-    let mut factor_data = HashMap::from([
-        ("stateToken", state_token)
-    ]);
+    /* let mut factor_data = HashMap::from([
+        ("stateToken", String::from(state_token))
+    ]); */
+
+    let mut factor_data = HashMap::new();
+    factor_data.insert("stateToken", String::from(state_token));
 
     let now = Instant::now();
 
     let mut displayed_challenge_answer = false;
 
     if (factor_type, factor_provider) == ("token:hardware", "YUBICO") {
-        match pamh.conv(Some("Please press your Yubikey."), PamMsgStyle::PROMPT_ECHO_OFF) {
+        /*match pamh.conv(Some("Please press your Yubikey."), PamMsgStyle::PROMPT_ECHO_OFF) {
             Ok(Some(code)) => {
                 let pass_code = code.to_str().unwrap_or("");
                 if pass_code.is_empty() {
@@ -80,6 +85,15 @@ fn verify_second_factor(pamh: &Pam, factor: &serde_json::Value, state_token: &st
             Ok(_) => return None,
             Err(PamError::CONV_ERR) => return Some(false),
             Err(_) => return None,
+        }*/
+        match prompt_func("Please press your Yubikey", true) {
+            Some(pass_code) => {
+                if pass_code.is_empty() {
+                    return None
+                }
+                factor_data.insert("passCode", pass_code);
+            },
+            None => return None,
         }
     }
 
@@ -111,10 +125,10 @@ fn verify_second_factor(pamh: &Pam, factor: &serde_json::Value, state_token: &st
 
             match (factor_type, factor_provider) {
                 ("token:software:totp", "OKTA") | ("token:software:totp", "GOOGLE") => {
-                    prompt = format!("{} 6-digit PIN: ", factor_provider);
+                    prompt = format!("{} 6-digit PIN", factor_provider);
                 },
                 ("call", "OKTA") | ("sms", "OKTA") => {
-                    prompt = format!("Verification code received via {}: ", factor_type);
+                    prompt = format!("Verification code received via {}", factor_type);
                 },
                 (_, _) => {
                     // println!("Received unexpected CHALLENGE result");
@@ -122,17 +136,15 @@ fn verify_second_factor(pamh: &Pam, factor: &serde_json::Value, state_token: &st
                 }
             };
 
-            match pamh.conv(Some(prompt.as_str()), PamMsgStyle::PROMPT_ECHO_OFF) {
-                Ok(Some(code)) => {
-                    let pass_code = code.to_str().unwrap_or("");
+            // match pamh.conv(Some(prompt.as_str()), PamMsgStyle::PROMPT_ECHO_OFF) {
+            match prompt_func(prompt.as_str(), true) {
+                Some(pass_code) => {
                     if pass_code.is_empty() {
                         return None
                     }
                     factor_data.insert("passCode", pass_code);
                 },
-                Ok(_) => return None,
-                Err(PamError::CONV_ERR) => return Some(false),
-                Err(_) => return None,
+                None => return None,
             }
         } else if factor_result == "REJECTED" {
             // User rejected the push notification
@@ -156,10 +168,11 @@ fn verify_second_factor(pamh: &Pam, factor: &serde_json::Value, state_token: &st
                 */
                 if !displayed_challenge_answer {
                     let prompt = format!("On your device, the correct answer is {}.", correct_answer);
-                    match pamh.conv(Some(prompt.as_str()), PamMsgStyle::TEXT_INFO) {
-                        Ok(_) => {},
-                        Err(_) => return None,
-                    };
+                    // match pamh.conv(Some(prompt.as_str()), PamMsgStyle::TEXT_INFO) {
+                    //     Ok(_) => {},
+                    //     Err(_) => return None,
+                    // };
+                    prompt_func(&prompt, false);
                     displayed_challenge_answer = true;
                 }
             },
@@ -170,6 +183,46 @@ fn verify_second_factor(pamh: &Pam, factor: &serde_json::Value, state_token: &st
     };
 
     None
+}
+
+fn _verify_second_factor(pamh: &Pam, factor: &serde_json::Value, state_token: &str) -> Option<bool> {
+    // let mut prompt_for_more_info = |prompt: &str| -> Option<String> {
+    //     match pamh.conv(Some(prompt), PamMsgStyle::PROMPT_ECHO_OFF) {
+    //         Ok(Some(code)) => {
+    //             Some(String::from(code.to_str().unwrap_or("")))
+    //         },
+    //         Ok(_) => return None,
+    //         Err(PamError::CONV_ERR) => return Some(String::from("")),
+    //         Err(_) => return None,
+    //     }
+    // }
+
+    verify_second_factor(
+        factor,
+        state_token,
+        |prompt: &str, response: bool| -> Option<String> {
+            let msg_style = if response {
+                PamMsgStyle::PROMPT_ECHO_OFF
+            } else {
+                PamMsgStyle::TEXT_INFO
+            };
+
+            let prompt = if response {
+                format!("{}: ", prompt)
+            } else {
+                String::from(prompt)
+            };
+
+            match pamh.conv(Some(&prompt), msg_style) {
+                Ok(Some(code)) => {
+                    Some(String::from(code.to_str().unwrap_or("")))
+                },
+                Ok(_) => return None,
+                Err(PamError::CONV_ERR) => return Some(String::from("")),
+                Err(_) => return None,
+            }
+        }
+    )
 }
 
 fn get_oauth2_userinfo(okta_tenant: &str, auth_header: &str) -> Option<String> {
@@ -509,7 +562,7 @@ impl PamServiceModule for PamOkta {
         };
 
         for factor in factors {
-            match verify_second_factor(&pamh, factor, state_token) {
+            match _verify_second_factor(&pamh, factor, state_token) {
                 Some(true) => return PamError::SUCCESS,
                 Some(false) => return PamError::AUTH_ERR,
                 None => {}

@@ -1,0 +1,76 @@
+stages:
+  - package
+  - upload
+
+# Only run branch pipelines
+workflow:
+  rules:
+    - if: '$CI_COMMIT_BRANCH'
+
+.parallel:
+  parallel:
+    matrix:
+      - OS: ubuntu
+        DIST:
+          - bionic
+          - focal
+        ARTIFACT_GLOB: "*.orig.tar.xz *.debian.tar.xz"
+        PACKAGE_GLOB: "*.deb *.dsc"
+      - OS: el
+        DIST:
+          - 7
+        PACKAGE_GLOB: "*.rpm"
+
+package:
+  extends: .parallel
+  stage: package
+  image: docker:19.03.9
+  services:
+    - docker:19.03.9-dind
+  variables:
+    XDG_CACHE_HOME: /cache
+    CARGO_HOME: /cache/.cargo
+    DOCKER_DRIVER: overlay2
+    DOCKER_TLS_CERTDIR: "/certs"
+    PRESERVE_ENVVARS: CARGO_HOME
+    CHANGELOG_NAME: $GITLAB_USER_NAME
+    CHANGELOG_EMAIL: $GITLAB_USER_EMAIL
+    CHANGELOG_TEXT: ""
+  tags:
+    - docker
+  before_script:
+    - apk add --no-cache git
+    - git clone https://github.com/packpack/packpack.git packpack
+  script:
+    - ./packpack/packpack prepare
+    - test "${OS}" -eq "ubuntu" && ./packpack/packpack dch-release
+    - ./packpack/packpack
+  after_script:
+    - mkdir -p dist/${OS}/${DIST}
+    - >
+      for ag in ${ARTIFACT_GLOB} ; do
+        cp -L build/${ag} dist/${OS}/${DIST}
+      done
+    - >
+      for pg in ${PACKAGE_GLOB} ; do
+        cp -L build/${pg} dist/${OS}/${DIST}
+      done
+  artifacts:
+    paths:
+      - dist/
+
+upload:
+  extends: .parallel
+  stage: upload
+  image: ruby:2.7
+  tags:
+    - docker
+  before_script:
+    - gem install package_cloud
+  script:
+    - >
+      for pg in ${PACKAGE_GLOB} ; do
+        package_cloud push hurricanelabs/okta/${OS}/${DIST} dist/${OS}/${DIST}/${pg}
+      done
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
